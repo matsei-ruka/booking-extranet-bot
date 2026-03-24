@@ -1,0 +1,30 @@
+{
+  "id": "booking-extranet",
+  "name": "Booking.com Extranet",
+  "description": "Manage Booking.com properties — download reservations, list/reply to guest messages, update rates.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "pythonPath": {
+        "type": "string",
+        "description": "Path to Python executable (inside venv). Defaults to 'python3'."
+      },
+      "botDir": {
+        "type": "string",
+        "description": "Path to the booking-extranet-bot directory."
+      }
+    },
+    "required": ["botDir"]
+  },
+  "uiHints": {
+    "pythonPath": {
+      "label": "Python path",
+      "placeholder": "/path/to/venv/bin/python3"
+    },
+    "botDir": {
+      "label": "Bot directory",
+      "placeholder": "/path/to/booking-extranet-bot"
+    }
+  }
+}

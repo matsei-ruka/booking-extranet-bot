@@ -1,0 +1,13 @@
+{
+  "name": "@matsei-ruka/openclaw-booking-extranet",
+  "version": "1.0.0",
+  "description": "OpenClaw plugin for Booking.com extranet automation",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0"
+  },
+  "license": "MIT"
+}
