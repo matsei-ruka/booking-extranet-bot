@@ -80,3 +80,4 @@ videos/
 .chrome-data/
 debug_*.py
 debug_*.png
+downloads/
