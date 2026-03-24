@@ -15,10 +15,19 @@ from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = [
-    'Property ID', 'Property name', 'Location', 'Guest name',
-    'Check-in', 'Check-out', 'Status', 'Total payment',
-    'Commission and charges', 'Reservation number', 'Booked on',
+# Columns as scraped from the table (in table order)
+SCRAPE_COLUMNS = [
+    'Property ID', 'Property name', 'Location', 'Booker name',
+    'Arrival', 'Departure', 'Status', 'Total payment',
+    'Commission', 'Reservation number', 'Booked on',
+]
+
+# Output column order matching Booking.com's own export format exactly
+OUTPUT_COLUMNS = [
+    'Property name', 'Location', 'Booker name',
+    'Arrival', 'Departure', 'Booked on', 'Status',
+    'Total payment', 'Commission', 'Reservation number',
+    'Property ID',  # extra column we have that Booking doesn't
 ]
 
 
@@ -142,9 +151,11 @@ class ReservationsManager:
                         logger.warning(f"Error scraping page {page_num}: {e}")
                         break
 
-            # Build Excel file
+            # Build Excel file with Booking.com-compatible column names and order
             import pandas as pd
-            df = pd.DataFrame(all_data, columns=COLUMNS[:len(all_data[0])] if all_data else COLUMNS)
+            df = pd.DataFrame(all_data, columns=SCRAPE_COLUMNS[:len(all_data[0])] if all_data else SCRAPE_COLUMNS)
+            # Reorder to match Booking.com's export format
+            df = df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
 
             filename = f"Reservations_{start_date}_{end_date}.xlsx"
             file_path = os.path.join(save_dir, filename)
