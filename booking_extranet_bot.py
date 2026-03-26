@@ -45,46 +45,69 @@ class BookingExtranetBot:
             raise ValueError("Missing required environment variables (BOOKING_USERNAME, BOOKING_PASSWORD). Please check .env file.")
 
     async def initialize_browser(self, headless: bool = False) -> None:
-        """Initialize browser using real Chrome to avoid bot detection"""
+        """Initialize browser using real Chrome to avoid bot detection.
+        Reuses an existing Chrome instance and tab if available."""
         try:
             self.playwright = await async_playwright().start()
 
-            # Use real Chrome via remote debugging to avoid CAPTCHA/bot detection
-            import platform
-            system = platform.system()
-            if system == 'Darwin':
-                chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            elif system == 'Linux':
-                # Try common Linux Chrome/Chromium paths
-                for path in ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium-browser', '/usr/bin/chromium']:
-                    if os.path.exists(path):
-                        chrome_path = path
-                        break
+            # Check if Chrome is already running with remote debugging
+            chrome_already_running = False
+            try:
+                import urllib.request
+                urllib.request.urlopen('http://localhost:9222/json/version', timeout=2)
+                chrome_already_running = True
+            except Exception:
+                pass
+
+            if not chrome_already_running:
+                # Launch Chrome with remote debugging
+                import platform
+                system = platform.system()
+                if system == 'Darwin':
+                    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                elif system == 'Linux':
+                    for path in ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium-browser', '/usr/bin/chromium']:
+                        if os.path.exists(path):
+                            chrome_path = path
+                            break
+                    else:
+                        raise FileNotFoundError("Chrome/Chromium not found. Install with: sudo apt install google-chrome-stable")
                 else:
-                    raise FileNotFoundError("Chrome/Chromium not found. Install with: sudo apt install google-chrome-stable")
-            else:
-                chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+                    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-            chrome_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.chrome-data')
+                chrome_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.chrome-data')
 
-            # Launch real Chrome with remote debugging
-            self.chrome_process = subprocess.Popen(
-                [
-                    chrome_path,
-                    '--remote-debugging-port=9222',
-                    f'--user-data-dir={chrome_data_dir}',
-                    '--no-first-run',
-                    '--no-default-browser-check',
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            await asyncio.sleep(3)  # Wait for Chrome to start
+                self.chrome_process = subprocess.Popen(
+                    [
+                        chrome_path,
+                        '--remote-debugging-port=9222',
+                        f'--user-data-dir={chrome_data_dir}',
+                        '--no-first-run',
+                        '--no-default-browser-check',
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                await asyncio.sleep(3)  # Wait for Chrome to start
 
             # Connect Playwright to the real Chrome instance
-            self.browser = await self.playwright.chromium.connect_over_cdp('http://localhost:9222')
+            self.browser = await self.playwright.chromium.connect_over_cdp(
+                'http://localhost:9222', timeout=30000,
+            )
             self.context = self.browser.contexts[0]
-            self.page = await self.context.new_page()
+
+            # Reuse the first existing tab, or create one if none exist
+            pages = self.context.pages
+            if pages:
+                self.page = pages[0]
+                # Close any extra tabs from previous runs
+                for extra_page in pages[1:]:
+                    try:
+                        await extra_page.close()
+                    except Exception:
+                        pass
+            else:
+                self.page = await self.context.new_page()
 
             # Initialize rate manager with the page
             self.rate_manager = RateManager(self.page)
@@ -234,14 +257,16 @@ class BookingExtranetBot:
             return False
 
     async def close(self) -> None:
-        """Clean up browser resources"""
+        """Disconnect from Chrome without closing the browser or tab.
+        Chrome stays running so the session persists for next invocation."""
         try:
-            if self.page:
-                await self.page.close()
+            # Disconnect Playwright from CDP — does NOT close Chrome or the tab
             if self.browser:
                 await self.browser.close()
-            if hasattr(self, 'chrome_process') and self.chrome_process:
-                self.chrome_process.terminate()
+            # Do NOT terminate the Chrome process — we want to reuse it
+            self.page = None
+            self.browser = None
+            self.context = None
             self.rate_manager = None
             logger.info("Browser closed successfully")
         except Exception as e:
