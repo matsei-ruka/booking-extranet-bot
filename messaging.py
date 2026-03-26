@@ -35,14 +35,14 @@ class MessagingManager:
             await self.page.goto(url, wait_until='domcontentloaded')
             await asyncio.sleep(5)  # Vue SPA needs time to render
 
-            # Wait for the message list or filter to appear
+            # Wait for conversation list items to appear
             try:
                 await self.page.wait_for_selector(
-                    'select[data-test-id="inbox-conversation-filter-select"]',
+                    'div.messages-list-item',
                     timeout=15000,
                 )
             except Exception:
-                logger.warning("Filter dropdown not found, page may still be loading")
+                logger.warning("Message list items not found, page may still be loading")
                 await asyncio.sleep(5)
 
             return True
@@ -69,90 +69,70 @@ class MessagingManager:
             if not await self._navigate_to_inbox(hotel_id):
                 return []
 
-            # Set the filter
+            # Set the filter using the visible <select> (no data-test-id)
             filter_map = {
-                'unanswered': 'PENDING_PROPERTY',
-                'sent': 'PENDING_GUEST',
-                'all': 'ALL',
+                'unanswered': 'pending_property',
+                'sent': 'pending_guest',
+                'all': '',
             }
-            filter_value = filter_map.get(filter_type, 'PENDING_PROPERTY')
+            filter_value = filter_map.get(filter_type, 'pending_property')
 
             try:
-                await self.page.select_option(
-                    'select[data-test-id="inbox-conversation-filter-select"]',
-                    filter_value,
-                    timeout=5000,
-                )
-                logger.info(f"Filter set to: {filter_type} ({filter_value})")
-                await asyncio.sleep(3)
+                # Find the visible select element
+                selects = await self.page.query_selector_all('select')
+                for sel in selects:
+                    if await sel.is_visible():
+                        await sel.select_option(filter_value)
+                        logger.info(f"Filter set to: {filter_type} ({filter_value})")
+                        await asyncio.sleep(3)
+                        break
             except Exception:
                 logger.warning("Could not set filter, using default")
 
-            # Get the unanswered count from badge
-            unanswered_count = 0
-            try:
-                badge = await self.page.query_selector('div[data-test-id="inbox-guest-counter"]')
-                if badge and await badge.is_visible():
-                    unanswered_count = int((await badge.inner_text()).strip())
-            except Exception:
-                pass
-
-            # Scrape message list items
+            # Scrape message list items using stable BEM class selectors
             messages = []
-            msg_buttons = await self.page.query_selector_all('button.dadb648d92')
+            msg_items = await self.page.query_selector_all('div.messages-list-item')
 
-            for i, btn in enumerate(msg_buttons):
+            for i, item in enumerate(msg_items):
                 try:
-                    visible = await btn.is_visible()
+                    visible = await item.is_visible()
                     if not visible:
                         continue
 
-                    # Check bounding box to filter out non-message buttons
-                    box = await btn.bounding_box()
-                    if not box or box['width'] < 200 or box['height'] < 40:
-                        continue
-
-                    # Extract message details
-                    name_el = await btn.query_selector('.list-item__title-text')
+                    # Guest name
+                    name_el = await item.query_selector('.messages-list-item__guest-name')
                     guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
 
-                    # Date element
-                    date_el = await btn.query_selector('.a91bd87e91')
+                    # Date/timestamp
+                    date_el = await item.query_selector('.messages-list-item__timestamp')
                     date = (await date_el.inner_text()).strip() if date_el else ''
 
                     # Preview text
-                    preview_el = await btn.query_selector('.b99b6ef58f')
+                    preview_el = await item.query_selector('.messages-list-item__content')
                     preview = (await preview_el.inner_text()).strip() if preview_el else ''
+
+                    # Unread indicator
+                    unread_el = await item.query_selector('.messages-list-item__unread-indicator')
+                    has_unread = unread_el is not None
 
                     messages.append({
                         'index': len(messages),
                         'guest_name': guest_name,
                         'date': date,
                         'preview': preview[:200],
+                        'unread': has_unread,
                     })
 
                 except Exception as e:
                     logger.debug(f"Error parsing message {i}: {e}")
                     continue
 
-            # If we couldn't parse individual messages, try a broader approach
-            if not messages and unanswered_count > 0:
-                logger.info("Falling back to text-based message extraction")
-                # Get all text from the message list area
-                try:
-                    list_area = await self.page.query_selector('.guest-tab--desktop')
-                    if list_area:
-                        text = await list_area.inner_text()
-                        logger.info(f"Message list text: {text[:500]}")
-                except Exception:
-                    pass
-
-            logger.info(f"Found {len(messages)} messages (unanswered badge: {unanswered_count})")
+            logger.info(f"Found {len(messages)} messages")
 
             return {
                 'hotel_id': hotel_id,
                 'filter': filter_type,
-                'unanswered_count': unanswered_count,
+                'message_count': len(messages),
                 'messages': messages,
             }
 
@@ -160,16 +140,13 @@ class MessagingManager:
             logger.error(f"Error listing messages: {e}")
             return {'hotel_id': hotel_id, 'filter': filter_type, 'unanswered_count': 0, 'messages': []}
 
-    async def _get_visible_conversation_buttons(self) -> list:
-        """Get visible conversation buttons from the inbox list"""
-        msg_buttons = await self.page.query_selector_all(
-            'button[data-test-id="inbox-conversation-item"]'
-        )
+    async def _get_conversation_items(self) -> list:
+        """Get visible conversation items from the inbox list"""
+        items = await self.page.query_selector_all('div.messages-list-item')
         visible = []
-        for btn in msg_buttons:
-            box = await btn.bounding_box()
-            if box and box['width'] > 200 and box['height'] > 40:
-                visible.append(btn)
+        for item in items:
+            if await item.is_visible():
+                visible.append(item)
         return visible
 
     async def read_conversation(
@@ -188,7 +165,7 @@ class MessagingManager:
             Dict with guest_name, reservation_info, and conversation messages
         """
         try:
-            visible_buttons = await self._get_visible_conversation_buttons()
+            visible_buttons = await self._get_conversation_items()
 
             if message_index >= len(visible_buttons):
                 logger.error(f"Message index {message_index} out of range ({len(visible_buttons)} messages)")
@@ -258,12 +235,12 @@ class MessagingManager:
                     return {'sent': False, 'error': 'Failed to navigate to inbox'}
 
             # Click the conversation
-            visible_buttons = await self._get_visible_conversation_buttons()
+            visible_buttons = await self._get_conversation_items()
             if message_index >= len(visible_buttons):
                 return {'sent': False, 'error': f'Message index {message_index} out of range ({len(visible_buttons)} messages)'}
 
             # Get guest name before clicking
-            name_el = await visible_buttons[message_index].query_selector('.list-item__title-text')
+            name_el = await visible_buttons[message_index].query_selector('.messages-list-item__guest-name')
             guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
 
             await visible_buttons[message_index].click()
@@ -271,7 +248,10 @@ class MessagingManager:
             await asyncio.sleep(3)
 
             # Find the reply textarea
-            textarea = await self.page.query_selector('textarea.chat-form__textarea')
+            textarea = await self.page.query_selector('textarea[data-test-id="messaging-main-input"]')
+            if not textarea:
+                # Fallback to class-based selector
+                textarea = await self.page.query_selector('textarea.chat-form__textarea')
             if not textarea:
                 return {'sent': False, 'error': 'Reply textarea not found'}
 
@@ -288,7 +268,7 @@ class MessagingManager:
             await asyncio.sleep(1)
 
             # Click Send
-            send_btn = self.page.locator('button:has-text("Send")')
+            send_btn = self.page.locator('button[data-test-id="send-message"]')
             await send_btn.click(timeout=5000)
             logger.info("Clicked Send button")
             await asyncio.sleep(3)

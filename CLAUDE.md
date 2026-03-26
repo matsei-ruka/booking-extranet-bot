@@ -76,18 +76,21 @@ The calendar uses an **inline side panel** (not modals):
   - `messaging_inbox` — Guest reservation messages (the ones to reply to)
   - `inbox` — Booking.com system messages (usually empty)
   - `guest_q_and_a` — Guest Q&A
-- **Filter dropdown**: `select[data-test-id="inbox-conversation-filter-select"]`
-  - `PENDING_PROPERTY` — Unanswered messages (default)
-  - `PENDING_GUEST` — Sent/awaiting guest reply
-  - `ALL` — All messages
-- **Badge counter**: `div[data-test-id="inbox-guest-counter"]` — unanswered count
-- **Message list items**: `button.dadb648d92` (obfuscated BUI classes)
-  - Guest name: `.list-item__title-text` (shows "Anonymous" in list, real name in conversation)
-  - Date: `.a91bd87e91`
-  - Preview: `.b99b6ef58f.b696009c86`
+- **Filter dropdown**: plain `<select>` (no data-test-id), find first visible `select`
+  - `pending_property` — Unanswered messages (default)
+  - `pending_guest` — Sent/awaiting guest reply
+  - `''` (empty) — All messages
+- **Message list items**: `div.messages-list-item` (stable BEM class)
+  - Guest name: `.messages-list-item__guest-name`
+  - Timestamp: `.messages-list-item__timestamp`
+  - Preview: `.messages-list-item__content`
+  - Unread dot: `.messages-list-item__unread-indicator`
+  - Selected: `.messages-list-item--selected`
+- **Reply textarea**: `textarea[data-test-id="messaging-main-input"]`
+- **Send button**: `button[data-test-id="send-message"]`
 - **SPA**: Vue.js app, clicking messages updates right panel without navigation
-- **Conversation view**: `div.message-list` contains message bubbles and reply area
-- **Search**: `input[data-test-id="conversation-search-input"]`
+- **Conversation header**: `div.conversation-header__guest-name`
+- **Reservation details**: `div.reservation-details__item` (right panel)
 
 ## CLI Commands
 ```bash
