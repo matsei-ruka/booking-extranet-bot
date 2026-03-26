@@ -2,6 +2,7 @@
 Messaging Module for Booking.com Extranet Bot
 
 Handles listing and reading guest messages from the property inbox.
+Uses fallback selector chains for resilience against DOM changes.
 """
 
 import asyncio
@@ -11,6 +12,94 @@ from typing import Optional, List, Dict
 from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
+
+
+# ── Selector fallback chains ─────────────────────────────────
+# Each key maps to a list of selectors tried in order.
+# When Booking.com changes their DOM, add the new selector at
+# position 0 and keep old ones as fallbacks.
+
+SELECTORS = {
+    'conversation_item': [
+        'button[data-test-id="inbox-conversation-item"]',
+        'button[data-testid="inbox-conversation-item"]',
+        'div.messages-list-item',
+        'button[class*="conversation"]',
+    ],
+    'filter_dropdown': [
+        'select[data-test-id="inbox-conversation-filter-select"]',
+        'select[data-testid="inbox-conversation-filter-select"]',
+    ],
+    'guest_name': [
+        '.list-item__title-text',
+        '.messages-list-item__guest-name',
+        '[class*="title-text"]',
+        '[class*="guest-name"]',
+    ],
+    'textarea': [
+        'textarea[data-test-id="messaging-main-input"]',
+        'textarea[data-testid="messaging-main-input"]',
+        'textarea.chat-form__textarea',
+        'textarea',
+    ],
+    'send_button': [
+        'button[data-test-id="send-message"]',
+        'button[data-testid="send-message"]',
+        'button:has-text("Send")',
+        'button:has-text("Invia")',
+    ],
+}
+
+
+async def _find_one(page, selector_key: str, timeout: int = 5000):
+    """Try each selector in the fallback chain, return first match."""
+    candidates = SELECTORS[selector_key]
+    for sel in candidates:
+        try:
+            el = page.locator(sel).first
+            await el.wait_for(state='visible', timeout=timeout)
+            logger.debug(f"Selector hit for '{selector_key}': {sel}")
+            return el
+        except Exception:
+            continue
+    logger.warning(f"No selector matched for '{selector_key}': tried {candidates}")
+    return None
+
+
+async def _find_all(page, selector_key: str) -> list:
+    """Try each selector in the fallback chain, return all matches from first that works."""
+    candidates = SELECTORS[selector_key]
+    for sel in candidates:
+        try:
+            items = await page.query_selector_all(sel)
+            visible = [it for it in items if await it.is_visible()]
+            if visible:
+                logger.debug(f"Selector hit for '{selector_key}': {sel} ({len(visible)} items)")
+                return visible
+        except Exception:
+            continue
+    logger.warning(f"No selector matched for '{selector_key}': tried {candidates}")
+    return []
+
+
+async def _find_all_filter(page) -> Optional:
+    """Find the filter dropdown — try data-test-id first, then first visible <select>."""
+    candidates = SELECTORS['filter_dropdown']
+    for sel in candidates:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                logger.debug(f"Filter dropdown found: {sel}")
+                return el
+        except Exception:
+            continue
+    # Last resort: find any visible <select> in the page
+    selects = await page.query_selector_all('select')
+    for s in selects:
+        if await s.is_visible():
+            logger.debug("Filter dropdown found via generic <select> fallback")
+            return s
+    return None
 
 
 class MessagingManager:
@@ -35,14 +124,10 @@ class MessagingManager:
             await self.page.goto(url, wait_until='domcontentloaded')
             await asyncio.sleep(5)  # Vue SPA needs time to render
 
-            # Wait for conversation list items to appear
-            try:
-                await self.page.wait_for_selector(
-                    'button[data-test-id="inbox-conversation-item"]',
-                    timeout=15000,
-                )
-            except Exception:
-                logger.warning("Message list items not found, page may still be loading")
+            # Wait for conversation list to appear (any fallback)
+            items = await _find_all(self.page, 'conversation_item')
+            if not items:
+                logger.warning("No conversation items found after navigation, waiting longer...")
                 await asyncio.sleep(5)
 
             return True
@@ -54,7 +139,7 @@ class MessagingManager:
         self,
         hotel_id: str,
         filter_type: str = 'unanswered',
-    ) -> List[Dict]:
+    ) -> Dict:
         """
         List messages from the inbox.
 
@@ -63,11 +148,11 @@ class MessagingManager:
             filter_type: 'unanswered' (default), 'sent', or 'all'
 
         Returns:
-            List of message dicts with guest_name, date, preview, status
+            Dict with hotel_id, filter, message_count, messages
         """
         try:
             if not await self._navigate_to_inbox(hotel_id):
-                return []
+                return {'hotel_id': hotel_id, 'filter': filter_type, 'message_count': 0, 'messages': []}
 
             # Set the filter
             filter_map = {
@@ -75,52 +160,77 @@ class MessagingManager:
                 'sent': 'PENDING_GUEST',
                 'all': 'ALL',
             }
+            # Also try lowercase variants (Booking.com sometimes changes case)
+            filter_map_alt = {
+                'unanswered': 'pending_property',
+                'sent': 'pending_guest',
+                'all': '',
+            }
             filter_value = filter_map.get(filter_type, 'PENDING_PROPERTY')
+            filter_value_alt = filter_map_alt.get(filter_type, 'pending_property')
 
-            try:
-                await self.page.select_option(
-                    'select[data-test-id="inbox-conversation-filter-select"]',
-                    filter_value,
-                    timeout=5000,
-                )
-                logger.info(f"Filter set to: {filter_type} ({filter_value})")
-                await asyncio.sleep(3)
-            except Exception:
-                logger.warning("Could not set filter, using default")
+            filter_el = await _find_all_filter(self.page)
+            if filter_el:
+                try:
+                    await self.page.evaluate(
+                        """(args) => {
+                            const [el, val, valAlt] = args;
+                            // Try exact match first, then alt
+                            for (const opt of el.options) {
+                                if (opt.value === val || opt.value === valAlt) {
+                                    el.value = opt.value;
+                                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""",
+                        [filter_el, filter_value, filter_value_alt],
+                    )
+                    logger.info(f"Filter set to: {filter_type}")
+                    await asyncio.sleep(3)
+                except Exception:
+                    logger.warning("Could not set filter via JS, trying select_option")
+                    try:
+                        await filter_el.select_option(filter_value, timeout=3000)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        try:
+                            await filter_el.select_option(filter_value_alt, timeout=3000)
+                            await asyncio.sleep(3)
+                        except Exception:
+                            logger.warning("Could not set filter, using default")
+            else:
+                logger.warning("Filter dropdown not found, using default view")
 
             # Scrape conversation items
             messages = []
-            msg_items = await self.page.query_selector_all(
-                'button[data-test-id="inbox-conversation-item"]'
-            )
+            msg_items = await _find_all(self.page, 'conversation_item')
 
             for i, item in enumerate(msg_items):
                 try:
-                    visible = await item.is_visible()
-                    if not visible:
-                        continue
+                    # Guest name — try fallback selectors
+                    guest_name = 'Unknown'
+                    for name_sel in SELECTORS['guest_name']:
+                        name_el = await item.query_selector(name_sel)
+                        if name_el:
+                            guest_name = (await name_el.inner_text()).strip()
+                            break
 
-                    # Guest name (stable BEM class)
-                    name_el = await item.query_selector('.list-item__title-text')
-                    guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
-
-                    # Date — look for small text elements with date-like content
+                    # Date — look for spans with date-like content
                     date = ''
                     spans = await item.query_selector_all('span')
+                    months = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
                     for span in spans:
                         text = (await span.inner_text()).strip()
-                        if text and ('20' in text or 'Jan' in text or 'Feb' in text or
-                                     'Mar' in text or 'Apr' in text or 'May' in text or
-                                     'Jun' in text or 'Jul' in text or 'Aug' in text or
-                                     'Sep' in text or 'Oct' in text or 'Nov' in text or
-                                     'Dec' in text):
+                        if text and any(m in text for m in months):
                             date = text
                             break
 
-                    # Preview — get all text, remove guest name and date
+                    # Preview — full text minus name and date
                     full_text = (await item.inner_text()).strip()
                     preview = full_text.replace(guest_name, '').replace(date, '').strip()
-                    # Clean up newlines
                     preview = ' '.join(preview.split())
 
                     messages.append({
@@ -145,18 +255,11 @@ class MessagingManager:
 
         except Exception as e:
             logger.error(f"Error listing messages: {e}")
-            return {'hotel_id': hotel_id, 'filter': filter_type, 'unanswered_count': 0, 'messages': []}
+            return {'hotel_id': hotel_id, 'filter': filter_type, 'message_count': 0, 'messages': []}
 
     async def _get_conversation_items(self) -> list:
         """Get visible conversation items from the inbox list"""
-        items = await self.page.query_selector_all(
-            'button[data-test-id="inbox-conversation-item"]'
-        )
-        visible = []
-        for item in items:
-            if await item.is_visible():
-                visible.append(item)
-        return visible
+        return await _find_all(self.page, 'conversation_item')
 
     async def read_conversation(
         self,
@@ -183,13 +286,12 @@ class MessagingManager:
             await visible_buttons[message_index].click()
             await asyncio.sleep(3)
 
-            # Read the conversation from the middle panel
             conversation = {
                 'index': message_index,
                 'messages': [],
             }
 
-            # Get the conversation container
+            # Get the conversation text from the middle panel
             msg_list = await self.page.query_selector('.message-list')
             if msg_list:
                 text = await msg_list.inner_text()
@@ -249,25 +351,26 @@ class MessagingManager:
                 return {'sent': False, 'error': f'Message index {message_index} out of range ({len(visible_buttons)} messages)'}
 
             # Get guest name before clicking
-            name_el = await visible_buttons[message_index].query_selector('.list-item__title-text')
-            guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
+            guest_name = 'Unknown'
+            for name_sel in SELECTORS['guest_name']:
+                name_el = await visible_buttons[message_index].query_selector(name_sel)
+                if name_el:
+                    guest_name = (await name_el.inner_text()).strip()
+                    break
 
             await visible_buttons[message_index].click()
             logger.info(f"Opened conversation with {guest_name}")
             await asyncio.sleep(3)
 
-            # Find the reply textarea
-            textarea = await self.page.query_selector('textarea[data-test-id="messaging-main-input"]')
-            if not textarea:
-                # Fallback to class-based selector
-                textarea = await self.page.query_selector('textarea.chat-form__textarea')
-            if not textarea:
-                return {'sent': False, 'error': 'Reply textarea not found'}
-
             # Check if the thread is closed
             body_text = await self.page.inner_text('body')
             if 'thread is closed' in body_text.lower():
                 return {'sent': False, 'error': 'Message thread is closed, cannot reply'}
+
+            # Find the reply textarea (fallback chain)
+            textarea = await _find_one(self.page, 'textarea', timeout=5000)
+            if not textarea:
+                return {'sent': False, 'error': 'Reply textarea not found'}
 
             # Type the reply
             await textarea.click()
@@ -276,13 +379,15 @@ class MessagingManager:
             logger.info(f"Typed reply: {reply_text[:50]}...")
             await asyncio.sleep(1)
 
-            # Click Send
-            send_btn = self.page.locator('button[data-test-id="send-message"]')
-            await send_btn.click(timeout=5000)
+            # Click Send (fallback chain)
+            send_btn = await _find_one(self.page, 'send_button', timeout=5000)
+            if not send_btn:
+                return {'sent': False, 'error': 'Send button not found'}
+
+            await send_btn.click()
             logger.info("Clicked Send button")
             await asyncio.sleep(3)
 
-            # Verify by checking if the message appeared or filter changed
             return {
                 'sent': True,
                 'guest_name': guest_name,
@@ -302,13 +407,11 @@ class MessagingManager:
             List of dicts with hotel_id, name, unread_messages
         """
         try:
-            # Navigate to group homepage
             ses = self._get_session()
             url = f"https://admin.booking.com/hotel/hoteladmin/groups/home/index.html?ses={ses}&lang=en"
             await self.page.goto(url, wait_until='networkidle')
             await asyncio.sleep(3)
 
-            # Extract properties and their messaging badge counts
             data = await self.page.evaluate("""() => {
                 const links = Array.from(document.querySelectorAll('a'));
                 const properties = {};
@@ -319,13 +422,11 @@ class MessagingManager:
                     if (!match) continue;
                     const hid = match[1];
 
-                    // Property name links (longer text, not just numbers)
                     const text = a.innerText.trim();
                     if (text.length > 5 && !/^\\d+$/.test(text) && !properties[hid]) {
                         properties[hid] = text;
                     }
 
-                    // Messaging links have the unread count as their text
                     if (a.href.includes('messaging') && /^\\d+$/.test(text)) {
                         msgCounts[hid] = parseInt(text);
                     }

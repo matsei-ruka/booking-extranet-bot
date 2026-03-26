@@ -71,30 +71,26 @@ The calendar uses an **inline side panel** (not modals):
 
 ## Messaging / Inbox (Property Level)
 - URL: `extranet_ng/manage/messaging/inbox.html?hotel_id={id}&ses={ses}&lang=en`
-- Navigation: `li[data-nav-tag="messaging"]` → submenu `messaging_inbox` (Reservation messages)
-- **Three submenu items**:
-  - `messaging_inbox` — Guest reservation messages (the ones to reply to)
-  - `inbox` — Booking.com system messages (usually empty)
-  - `guest_q_and_a` — Guest Q&A
-- **Filter dropdown**: plain `<select>` (no data-test-id), find first visible `select`
-  - `pending_property` — Unanswered messages (default)
-  - `pending_guest` — Sent/awaiting guest reply
-  - `''` (empty) — All messages
-- **Message list items**: `div.messages-list-item` (stable BEM class)
-  - Guest name: `.messages-list-item__guest-name`
-  - Timestamp: `.messages-list-item__timestamp`
-  - Preview: `.messages-list-item__content`
-  - Unread dot: `.messages-list-item__unread-indicator`
-  - Selected: `.messages-list-item--selected`
-- **Reply textarea**: `textarea[data-test-id="messaging-main-input"]`
-- **Send button**: `button[data-test-id="send-message"]`
 - **SPA**: Vue.js app, clicking messages updates right panel without navigation
-- **Conversation header**: `div.conversation-header__guest-name`
-- **Reservation details**: `div.reservation-details__item` (right panel)
+- **IMPORTANT**: Booking.com changes DOM selectors frequently. All selectors use fallback
+  chains defined in `messaging.py` → `SELECTORS` dict. When a selector breaks, add the
+  new one at position 0 and keep old ones as fallbacks.
+- **Verified selectors** (as of March 2026):
+  - Conversation items: `button[data-test-id="inbox-conversation-item"]`
+  - Filter dropdown: `select[data-test-id="inbox-conversation-filter-select"]`
+    - Values: `PENDING_PROPERTY` (unanswered), `PENDING_GUEST` (sent), `ALL`
+  - Guest name inside item: `.list-item__title-text`
+  - Reply textarea: `textarea.chat-form__textarea`
+  - Send button: `button:has-text("Send")` (NO data-test-id on this button)
+- **Reservation details**: extracted via JS `body.innerText` label scanning (right panel)
 
 ## CLI Commands
 ```bash
-python cli.py download-reservations --start YYYY-MM-DD --end YYYY-MM-DD [--date-type arrival|departure|booking] [--output-dir path]
+python cli.py list-properties
+python cli.py list-messages --hotel-id ID [--filter unanswered|sent|all]
+python cli.py read-message --hotel-id ID --index N
+python cli.py send-message --hotel-id ID --index N --message "text"
+python cli.py download-reservations --start YYYY-MM-DD --end YYYY-MM-DD [--date-type arrival|departure|booking] [--json] [--output-dir path]
 python cli.py update-rates [--hotel-id ID]
 ```
 - JSON output to stdout, logs to stderr + `booking_bot.log`
