@@ -116,19 +116,29 @@ class MessagingManager:
         """Navigate to the reservation messages inbox for a property"""
         try:
             ses = self._get_session()
+            # If no session token in current URL, seed it via the property homepage
+            if not ses:
+                seed_url = (
+                    f"https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/"
+                    f"home.html?hotel_id={hotel_id}"
+                )
+                await self.page.goto(seed_url, wait_until='domcontentloaded')
+                await asyncio.sleep(4)
+                ses = self._get_session()
+                logger.info(f"Seeded session for hotel {hotel_id}: ses={ses[:8]}...")
             url = (
                 f"https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/"
                 f"messaging/inbox.html?hotel_id={hotel_id}&ses={ses}&lang=en"
             )
             logger.info(f"Navigating to inbox for property {hotel_id}...")
             await self.page.goto(url, wait_until='domcontentloaded')
-            await asyncio.sleep(5)  # Vue SPA needs time to render
+            await asyncio.sleep(8)  # Vue SPA needs time to render
 
             # Wait for conversation list to appear (any fallback)
             items = await _find_all(self.page, 'conversation_item')
             if not items:
                 logger.warning("No conversation items found after navigation, waiting longer...")
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
 
             return True
         except Exception as e:

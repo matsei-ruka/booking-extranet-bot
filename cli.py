@@ -226,8 +226,8 @@ async def cmd_send_message(args):
         messaging = MessagingManager(bot.page)
         hotel_id = args.hotel_id or DEFAULT_HOTEL_ID
 
-        # Navigate to inbox first
-        await messaging._navigate_to_inbox(hotel_id)
+        # Navigate to inbox and set filter before sending
+        await messaging.list_messages(hotel_id=hotel_id, filter_type=args.filter)
 
         result = await messaging.send_reply(
             hotel_id=hotel_id,
@@ -339,6 +339,8 @@ Examples:
     send_parser.add_argument('--index', type=int, required=True, help='Message index from list-messages (0-based)')
     send_parser.add_argument('--message', required=True, help='Reply text to send')
     send_parser.add_argument('--hotel-id', default=None, help='Hotel ID (default: from .env)')
+    send_parser.add_argument('--filter', default='unanswered', choices=['unanswered', 'sent', 'all'],
+                             help='Inbox filter to use when selecting conversation (default: unanswered)')
 
     # ─── list-properties ───────────────────────────────────────
     subparsers.add_parser(
